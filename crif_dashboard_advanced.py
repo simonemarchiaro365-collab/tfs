@@ -68,6 +68,51 @@ def rating_color_map() -> dict:
     }
 
 
+def highlight_negative(val) -> str:
+    try:
+        return "color: red; font-weight: bold;" if float(val) < 0 else ""
+    except Exception:
+        return ""
+
+
+def rating_band_color(rating: str) -> str:
+    """Ritorna un colore di sfondo tenue in base alla classe di rating (per righe/colonne)."""
+    rating = str(rating)
+    if rating in {"1", "2", "3"}:
+        return "#e9f6ec"  # verde chiaro
+    if rating in {"4", "5"}:
+        return "#fff7d6"  # giallo chiaro
+    if rating in {"6", "7"}:
+        return "#ffe9e9"  # rosso chiaro
+    if rating in {"10"}:
+        return "#f0f0f0"  # nero/grigio chiaro
+    if rating == "Cessata":
+        return "#f5f5f5"
+    if rating == "Non valutabile":
+        return "#f5f5f5"
+    if rating == "New entry":
+        return "#e8f2ff"  # azzurro tenue
+    return ""
+
+
+def rating_band_style_rows(df: pd.DataFrame) -> pd.DataFrame:
+    styles = pd.DataFrame("", index=df.index, columns=df.columns)
+    for idx in df.index:
+        color = rating_band_color(idx)
+        if color:
+            styles.loc[idx, :] = f"background-color: {color};"
+    return styles
+
+
+def rating_band_style_cols(df: pd.DataFrame) -> pd.DataFrame:
+    styles = pd.DataFrame("", index=df.index, columns=df.columns)
+    for col in df.columns:
+        color = rating_band_color(col)
+        if color:
+            styles.loc[:, col] = f"background-color: {color};"
+    return styles
+
+
 # ===== Configurazione e caricamento dati =====
 st.sidebar.header("Configurazione dati")
 file_exists = os.path.exists(DEFAULT_FILE)
@@ -163,10 +208,14 @@ with pan_tab:
     if {"Esposizione", "Overdue"}.issubset(df.columns):
         color_map = rating_color_map()
         color_series = df.get("CRIF Rating", pd.Series(dtype=str)).astype(str)
+        rating_order = ["1", "2", "3", "4", "5", "6", "7", "10", "Non valutabile", "Cessata", "New entry"]
 
         # Filtri
         colf1, colf2 = st.columns(2)
-        rating_opts = sorted(color_series.dropna().unique().tolist())
+        rating_opts = color_series.dropna().unique().tolist()
+        rating_present = [r for r in rating_order if r in rating_opts]
+        if not rating_present:
+            rating_present = sorted(rating_opts)
         brand_opts = sorted(df["Brand"].dropna().unique().tolist()) if "Brand" in df.columns else []
 
         with colf1:
@@ -234,6 +283,7 @@ with pan_tab:
             title="Esposizione vs Overdue (colorato per rating)",
             labels={"color": "CRIF Rating"},
             color_discrete_map=color_map,
+            category_orders={"CRIF Rating": rating_present},
         )
         if use_log_x:
             fig_scatter.update_xaxes(type="log")
@@ -286,6 +336,24 @@ with pan_tab:
         )
         st.plotly_chart(fig_heat, use_container_width=True, key="heatmap_rating_cluster")
 
+        # Heatmap aggiuntiva: conteggio clienti per rating e cluster
+        count_values = "CUSTOMER_CODE" if "CUSTOMER_CODE" in df.columns else "CRIF Rating"
+        pivot_count = pd.pivot_table(
+            df,
+            index="CRIF Rating",
+            columns="Cluster Expo",
+            values=count_values,
+            aggfunc="count",
+            fill_value=0,
+        )
+        fig_heat_count = px.imshow(
+            pivot_count,
+            color_continuous_scale="Blues",
+            title="Heatmap conteggio clienti per Rating e Cluster Expo",
+            aspect="auto",
+        )
+        st.plotly_chart(fig_heat_count, use_container_width=True, key="heatmap_rating_cluster_count")
+
     # Indicatori di concentrazione (HHI e share top 10/20)
     if "Esposizione" in df.columns:
         expo = df["Esposizione"].fillna(0).clip(lower=0)
@@ -336,18 +404,14 @@ with delta_tab:
         df_delta = df[req_cols + ["Esposizione", "Overdue", "Variazione CRIF"]].copy()
         df_delta["Cambio rating"] = df_delta["CRIF Rating"] != df_delta["CRIF Rating 2025-08"]
 
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            st.metric("Totale record", len(df_delta))
-        with col2:
-            changed = int(df_delta["Cambio rating"].sum())
-            st.metric("Rating cambiati", changed)
-        with col3:
-            perc_change = 100 * changed / max(len(df_delta), 1)
-            st.metric("% cambiati", f"{perc_change:.1f}%")
+        cols_top = st.columns(6)
+        changed = int(df_delta["Cambio rating"].sum())
+        perc_change = 100 * changed / max(len(df_delta), 1)
 
         matrix = pd.crosstab(df_delta["CRIF Rating 2025-08"], df_delta["CRIF Rating"])
-        st.write("Matrice transizioni agosto → dicembre")
+        # Rimuove righe/colonne totalmente vuote per una vista più pulita
+        matrix = matrix.loc[(matrix.sum(axis=1) > 0), (matrix.sum(axis=0) > 0)]
+        st.write("Matrice transizioni agosto → dicembre (conteggi)")
 
         # KPI invariati/migliorati/peggiorati
         rating_order = ["1", "2", "3", "4", "5", "6", "7", "10", "Non valutabile", "Cessata", "New entry"]
@@ -362,12 +426,17 @@ with delta_tab:
         migliorati = int((new_rank < old_rank).sum())
         peggiorati = int((new_rank > old_rank).sum())
 
-        k1, k2, k3 = st.columns(3)
-        with k1:
+        with cols_top[0]:
+            st.metric("Totale record", len(df_delta))
+        with cols_top[1]:
+            st.metric("Rating cambiati", changed)
+        with cols_top[2]:
+            st.metric("% cambiati", f"{perc_change:.1f}%")
+        with cols_top[3]:
             st.metric("Invariati", invariati)
-        with k2:
+        with cols_top[4]:
             st.metric("Migliorati", migliorati)
-        with k3:
+        with cols_top[5]:
             st.metric("Peggiorati", peggiorati)
 
         diag_style = pd.DataFrame("", index=matrix.index, columns=matrix.columns)
@@ -375,8 +444,38 @@ with delta_tab:
             if idx in matrix.columns:
                 diag_style.loc[idx, idx] = "background-color: #d1f7c4; font-weight: bold;"
 
-        styled_matrix = matrix.style.apply(lambda _: diag_style, axis=None)
+        styled_matrix = (
+            matrix.style.apply(rating_band_style_cols, axis=None)
+            .apply(lambda _: diag_style, axis=None)
+        )
         st.dataframe(styled_matrix, use_container_width=True, height=720)
+
+        # Matrice esposizione per transizioni (somma Esposizione)
+        if "Esposizione" in df_delta.columns:
+            matrix_exp = pd.pivot_table(
+                df_delta,
+                index="CRIF Rating 2025-08",
+                columns="CRIF Rating",
+                values="Esposizione",
+                aggfunc="sum",
+                fill_value=0,
+            )
+            # Mantieni anche valori negativi: rimuovi solo righe/colonne davvero tutte a zero
+            matrix_exp = matrix_exp.loc[(matrix_exp != 0).any(axis=1), (matrix_exp != 0).any(axis=0)]
+
+            diag_style_exp = pd.DataFrame("", index=matrix_exp.index, columns=matrix_exp.columns)
+            for idx in matrix_exp.index:
+                if idx in matrix_exp.columns:
+                    diag_style_exp.loc[idx, idx] = "background-color: #d1f7c4; font-weight: bold;"
+
+            styled_matrix_exp = (
+                matrix_exp.style.format("{:,.2f}")
+                .apply(rating_band_style_cols, axis=None)
+                .apply(lambda _: diag_style_exp, axis=None)
+                .applymap(highlight_negative)
+            )
+            st.write("Matrice transizioni agosto → dicembre (esposizione)")
+            st.dataframe(styled_matrix_exp, use_container_width=True, height=720)
 
         if "Variazione CRIF" in df_delta.columns:
             fig_var = px.histogram(
@@ -477,6 +576,11 @@ with delta_tab:
 with cluster_tab:
     # ----- Clustering -----
     st.subheader("Clustering su dati di dicembre")
+    st.markdown(
+        "**Nota sui cluster KMeans**: i cluster sono rinumerati dal piu' rischioso al meno rischioso usando l'Overdue medio. "
+        "Cluster 0 = Overdue medio piu' alto (piu' rischio), i numeri aumentano al diminuire dell'Overdue medio. "
+        "L'ordine delle feature scelte sopra non cambia questo ordinamento, che resta fisso per interpretazione."
+    )
     num_cols = ensure_columns(df, ["Esposizione", "Overdue", "Variazione CRIF"])
     if not num_cols:
         st.warning("Nessuna colonna numerica disponibile per il clustering")
@@ -552,21 +656,48 @@ with cluster_tab:
                 )
                 st.plotly_chart(fig_od, use_container_width=True)
 
+        total_expo_cluster = df_vis["Esposizione"].sum()
         cluster_summary = (
             df_vis.groupby("Cluster_KMeans")
             .agg(
                 Numerosita=("CUSTOMER_CODE", "count"),
                 Esposizione_media=("Esposizione", "mean"),
+                Esposizione_mediana=("Esposizione", "median"),
+                Esposizione_totale=("Esposizione", "sum"),
                 Overdue_medio=("Overdue", "mean"),
+                Overdue_mediana=("Overdue", "median"),
             )
             .reset_index()
             .sort_values("Cluster_KMeans")
         )
+        if total_expo_cluster > 0:
+            cluster_summary["Share_esposizione"] = cluster_summary["Esposizione_totale"] / total_expo_cluster
+
         cluster_summary_fmt = cluster_summary.copy()
         cluster_summary_fmt["Numerosita"] = cluster_summary_fmt["Numerosita"].map(lambda v: f"{v:,.0f}")
-        cluster_summary_fmt["Esposizione_media"] = cluster_summary_fmt["Esposizione_media"].map(lambda v: f"{v:,.0f}")
-        cluster_summary_fmt["Overdue_medio"] = cluster_summary_fmt["Overdue_medio"].map(lambda v: f"{v:,.0f}")
+        for col in ["Esposizione_media", "Esposizione_mediana", "Esposizione_totale", "Overdue_medio", "Overdue_mediana"]:
+            cluster_summary_fmt[col] = cluster_summary_fmt[col].map(lambda v: f"{v:,.0f}")
+        if "Share_esposizione" in cluster_summary_fmt.columns:
+            cluster_summary_fmt["Share_esposizione"] = cluster_summary_fmt["Share_esposizione"].map(lambda v: f"{v:.1%}")
+        st.write("Sintesi cluster")
         st.dataframe(cluster_summary_fmt, use_container_width=True)
+
+        # Heatmap quantili (p25, p50, p75) separate per Esposizione e Overdue
+        quantiles = [0.25, 0.5, 0.75]
+        for measure in ["Esposizione", "Overdue"]:
+            q_series = df_vis.groupby("Cluster_KMeans")[measure].quantile(quantiles)
+            rows = []
+            for (cluster_id, q), val in q_series.items():
+                rows.append({"Quantile": f"p{int(q*100)}", "Cluster": cluster_id, "Valore": val})
+            quant_df = pd.DataFrame(rows)
+            heat_data = quant_df.pivot(index="Quantile", columns="Cluster", values="Valore")
+            fig_quant = px.imshow(
+                heat_data,
+                color_continuous_scale="Blues",
+                aspect="auto",
+                title=f"Quantili per cluster ({measure})",
+            )
+            st.plotly_chart(fig_quant, use_container_width=True)
 
 
 with model_tab:
